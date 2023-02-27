@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  tests:
+    image: golang:1.18
+    volumes:
+      - ./tests:/code
+    working_dir: /code
+    environment:
+      host: "http://web:8080"
+    links:
+      - web
+    command: bash -c "go mod tidy && go test -v"

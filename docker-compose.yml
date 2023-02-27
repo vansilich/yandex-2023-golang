@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  web:
+    build:
+      context: .
+      args:
+        LOCAL: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+    links:
+      - redis
+  redis:
+    image: "redis:alpine"
