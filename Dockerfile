@@ -1,4 +1,4 @@
-FROM golang:1.18
+FROM golang:1.20-alpine
 
 WORKDIR /usr/src/app
 
@@ -12,4 +12,3 @@ RUN go mod tidy
 RUN go build -v -o /usr/local/bin/app
 
 CMD ["app"]
-
