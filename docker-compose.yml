@@ -1,7 +1,8 @@
 version: "3.9"
 
 services:
-  web:
+  app:
+    container_name: app
     build:
       context: .
       args:
@@ -9,8 +10,18 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - redis
+      - db
     links:
-      - redis
-  redis:
-    image: "redis:alpine"
+      - db
+    networks:
+      - enrollment
+
+  db:
+    container_name: db
+    image: postgres:15.2-alpine
+    networks:
+      - enrollment
+
+networks:
+  enrollment:
+    driver: bridge
