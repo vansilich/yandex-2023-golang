@@ -1,6 +1,7 @@
 package bydate
 
 import (
+	"context"
 	"time"
 
 	"yandex-team.ru/bstask/internal/entity"
@@ -27,7 +28,7 @@ func New(
 	}
 }
 
-func (a *ActionAssignByDate) Assign(assignDate time.Time) (AssignResponseGroup, error) {
+func (a *ActionAssignByDate) Assign(ctx context.Context, assignDate time.Time) (AssignResponseGroup, error) {
 
 	assignDate = assignDate.UTC()
 
@@ -35,48 +36,40 @@ func (a *ActionAssignByDate) Assign(assignDate time.Time) (AssignResponseGroup, 
 		Date: assignDate,
 	}
 
-	err := a.OrderRepo.Atomic(func(repo repositories.OrderRepo) error {
-
-		footCouriersWorkingHours, err := a.CourierRepo.AllWorkingHoursByCourierType(entity.FOOT)
-		if err != nil {
-			return err
-		}
-
-		for _, wh := range *footCouriersWorkingHours {
-			err := a.assignToWorkingInterval(assignDate, wh, repo)
-			if err != nil {
-				return err
-			}
-		}
-
-		bikeCouriersWorkingHours, err := a.CourierRepo.AllWorkingHoursByCourierType(entity.BIKE)
-		if err != nil {
-			return err
-		}
-
-		for _, wh := range *bikeCouriersWorkingHours {
-			err := a.assignToWorkingInterval(assignDate, wh, repo)
-			if err != nil {
-				return err
-			}
-		}
-
-		autoCouriersWorkingHours, err := a.CourierRepo.AllWorkingHoursByCourierType(entity.AUTO)
-		if err != nil {
-			return err
-		}
-
-		for _, wh := range *autoCouriersWorkingHours {
-			err := a.assignToWorkingInterval(assignDate, wh, repo)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
+	footCouriersWorkingHours, err := a.CourierRepo.AllWorkingHoursByCourierType(ctx, entity.FOOT)
 	if err != nil {
 		return AssignResponseGroup{}, err
+	}
+
+	for _, wh := range *footCouriersWorkingHours {
+		err := a.assignToWorkingInterval(ctx, assignDate, wh, *a.OrderRepo)
+		if err != nil {
+			return AssignResponseGroup{}, err
+		}
+	}
+
+	bikeCouriersWorkingHours, err := a.CourierRepo.AllWorkingHoursByCourierType(ctx, entity.BIKE)
+	if err != nil {
+		return AssignResponseGroup{}, err
+	}
+
+	for _, wh := range *bikeCouriersWorkingHours {
+		err := a.assignToWorkingInterval(ctx, assignDate, wh, *a.OrderRepo)
+		if err != nil {
+			return AssignResponseGroup{}, err
+		}
+	}
+
+	autoCouriersWorkingHours, err := a.CourierRepo.AllWorkingHoursByCourierType(ctx, entity.AUTO)
+	if err != nil {
+		return AssignResponseGroup{}, err
+	}
+
+	for _, wh := range *autoCouriersWorkingHours {
+		err := a.assignToWorkingInterval(ctx, assignDate, wh, *a.OrderRepo)
+		if err != nil {
+			return AssignResponseGroup{}, err
+		}
 	}
 
 	for _, gr := range couriersOrders {
@@ -87,6 +80,7 @@ func (a *ActionAssignByDate) Assign(assignDate time.Time) (AssignResponseGroup, 
 }
 
 func (a *ActionAssignByDate) assignToWorkingInterval(
+	ctx context.Context,
 	assignDate time.Time,
 	wh repositories.AllWorkingHoursRes,
 	orderRepo repositories.OrderRepo,
@@ -118,22 +112,22 @@ func (a *ActionAssignByDate) assignToWorkingInterval(
 		var order *entity.Order
 
 		if courierState.isTimeToFlush() {
-			courierState.flush()
+			courierState.flush(ctx)
 		}
 
 		if courierState.isTimeToStop() {
 			break
 		}
 
-		order, err := a.orderForCurrentState(orderRepo, *courierState)
+		order, err := a.orderForCurrentState(ctx, orderRepo, *courierState)
 		if err != nil {
 			return err
 		}
 
 		if order == nil {
 			if courierState.isOnTheWay {
-				courierState.flush()
-				order, err = a.orderForCurrentState(orderRepo, *courierState)
+				courierState.flush(ctx)
+				order, err = a.orderForCurrentState(ctx, orderRepo, *courierState)
 				if err != nil {
 					return err
 				}
@@ -144,12 +138,12 @@ func (a *ActionAssignByDate) assignToWorkingInterval(
 			}
 		}
 
-		completeDateTime, discountPrice, err := courierState.addOrder(*order)
+		completeDateTime, discountPrice, err := courierState.addOrder(ctx, *order)
 		if err != nil {
 			return nil
 		}
 
-		err = orderRepo.SetCompletedInfo(order, repositories.OrderCompleteInfoDTO{
+		err = orderRepo.SetCompletedInfo(ctx, order, repositories.OrderCompleteInfoDTO{
 			CourierID:       wh.CourierID,
 			DeliveryGroupID: courierState.deliveryGroup.ID,
 			Cost:            discountPrice,
@@ -166,52 +160,45 @@ func (a *ActionAssignByDate) assignToWorkingInterval(
 }
 
 func (a *ActionAssignByDate) orderForCurrentState(
+	ctx context.Context,
 	orderRepo repositories.OrderRepo,
 	cs courierBatchState,
 ) (*entity.Order, error) {
 
 	var (
-		params repositories.FindInRegionsForCourierDTO
-		order  *entity.Order
-		err    error
+		order *entity.Order
+		err   error
 	)
 
-	if cs.isOnTheWay {
+	params := repositories.FindInRegionsForCourierDTO{
+		MaxWeight:          cs.availableWeight(),
+		Regions:            []int32{cs.currRegion},
+		DeliveryHoursStart: cs.nextDeliveryStartDateTime,
+		DeliveryHoursEnd:   cs.shiftEndDateTime,
+		OrderByWeightASC:   false,
+		WithGap:            false,
+	}
 
+	if cs.isOnTheWay {
 		// Search in specific region
 		if cs.nextWillBeLast() {
-			params = repositories.FindInRegionsForCourierDTO{
-				MaxWeight:          cs.availableWeight(),
-				Regions:            []int32{cs.currRegion},
-				DeliveryHoursStart: cs.nextDeliveryStartDateTime,
-				DeliveryHoursEnd:   cs.shiftEndDateTime,
-			}
-			order, err = orderRepo.FindInRegionForCourier(params, false)
+			order, err = orderRepo.FindInRegionForCourier(ctx, params)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			params = repositories.FindInRegionsForCourierDTO{
-				MaxWeight:          cs.availableWeight(),
-				Regions:            []int32{cs.currRegion},
-				DeliveryHoursStart: cs.nextDeliveryStartDateTime,
-				DeliveryHoursEnd:   cs.shiftEndDateTime,
-			}
-			order, err = orderRepo.FindInRegionForCourier(params, true)
+			params.OrderByWeightASC = true
+			order, err = orderRepo.FindInRegionForCourier(ctx, params)
 			if err != nil {
 				return nil, err
 			}
 		}
 	} else {
-
 		// Search in any available region
-		params = repositories.FindInRegionsForCourierDTO{
-			MaxWeight:          cs.availableWeight(),
-			Regions:            cs.availableRegions,
-			DeliveryHoursStart: cs.nextDeliveryStartDateTime,
-			DeliveryHoursEnd:   cs.shiftEndDateTime,
-		}
-		order, err = orderRepo.FindInRegionForCourier(params, true)
+		params.Regions = cs.availableRegions
+		params.OrderByWeightASC = true
+
+		order, err = orderRepo.FindInRegionForCourier(ctx, params)
 		if err != nil {
 			return nil, err
 		}
@@ -219,7 +206,10 @@ func (a *ActionAssignByDate) orderForCurrentState(
 
 	if order == nil {
 		// try find with gap
-		order, err = orderRepo.FindInRegionWithGapForCourier(params)
+		params.WithGap = true
+		params.OrderByWeightASC = true
+
+		order, err = orderRepo.FindInRegionForCourier(ctx, params)
 		if err != nil {
 			return nil, err
 		}

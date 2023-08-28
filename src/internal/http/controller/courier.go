@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -72,7 +73,8 @@ func (c *CourierController) Assignments(ctx echo.Context) error {
 		courierIDs = append(courierIDs, uint64(id))
 	}
 
-	assignments, err := c.uc.Assignments(courierIDs, date)
+	co := context.Background()
+	assignments, err := c.uc.Assignments(co, courierIDs, date)
 	if err != nil {
 		return err
 	}
@@ -151,7 +153,7 @@ func (c *CourierController) GetAll(ctx echo.Context) error {
 		}
 	}
 
-	couriers, err := c.uc.PaginatedGetAll(int32(offset), int32(limit))
+	couriers, err := c.uc.PaginatedGetAll(context.Background(), int32(offset), int32(limit))
 	if err != nil {
 		return err
 	}
@@ -182,8 +184,8 @@ type CourierCreateRequest struct {
 
 type CourierRequestCreateDto struct {
 	CourierType  string   `json:"courier_type" validate:"required"`
-	Regions      []int32  `json:"regions" validate:"required"`
-	WorkingHours []string `json:"working_hours" validate:"required"`
+	Regions      []int32  `json:"regions" validate:"required,min=1,max=1000"`
+	WorkingHours []string `json:"working_hours" validate:"required,min=1,max=1000"`
 }
 
 type CourierCreateResponse struct {
@@ -211,7 +213,7 @@ func (c *CourierController) Create(ctx echo.Context) error {
 		})
 	}
 
-	savedCouriers, err := c.uc.CreateCouriers(newCouriers)
+	savedCouriers, err := c.uc.CreateCouriers(context.Background(), newCouriers)
 	if err != nil {
 		return err
 	}
@@ -242,10 +244,10 @@ func (c *CourierController) GetById(ctx echo.Context) error {
 
 	courierId, err := strconv.Atoi(courierIdParam)
 	if err != nil || courierId <= 0 || courierId > math.MaxInt64 {
-		return echo.NewHTTPError(http.StatusBadRequest, ":courier_id must be valid integer")
+		return echo.NewHTTPError(http.StatusBadRequest, ":courier_id must be valid int64")
 	}
 
-	courier, err := c.uc.GetById(uint64(courierId))
+	courier, err := c.uc.GetById(context.Background(), uint64(courierId))
 	if err != nil {
 		return err
 	}
@@ -287,12 +289,14 @@ func (c *CourierController) MetaByCourierId(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid :endDate param")
 	}
 
-	courier, err := c.uc.GetById(uint64(courierId))
+	co := context.Background()
+
+	courier, err := c.uc.GetById(co, uint64(courierId))
 	if err != nil {
 		return err
 	}
 
-	meta, err := c.uc.MetaInInterval(courier, startDate, endDate)
+	meta, err := c.uc.MetaInInterval(co, courier, startDate, endDate)
 	if err != nil {
 		return err
 	}

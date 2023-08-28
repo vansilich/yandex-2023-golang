@@ -1,14 +1,16 @@
 package repositories
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
 
+	trmgorm "github.com/avito-tech/go-transaction-manager/gorm"
 	"github.com/lib/pq"
 	"gorm.io/gorm"
+	"yandex-team.ru/bstask"
 	"yandex-team.ru/bstask/internal/entity"
-	appErrors "yandex-team.ru/bstask/internal/errors"
 	"yandex-team.ru/bstask/pkg/gorm/types"
 )
 
@@ -30,43 +32,15 @@ type CourierWorkingHours struct {
 }
 
 type CourierRepo struct {
-	gorm *gorm.DB
+	gorm      *gorm.DB
+	ctxGetter *trmgorm.CtxGetter
 }
 
-var (
-	CourierNotFoundError = appErrors.NewInternalError(nil, "Courier not found", true)
-)
-
-func NewCourierRepo(grm *gorm.DB) *CourierRepo {
+func NewCourierRepo(grm *gorm.DB, c *trmgorm.CtxGetter) *CourierRepo {
 	return &CourierRepo{
-		gorm: grm,
+		gorm:      grm,
+		ctxGetter: c,
 	}
-}
-
-func (s *CourierRepo) Atomic(fn func(repo CourierRepo) error) error {
-	tx := s.gorm.Begin()
-	if err := tx.Error; err != nil {
-		return err
-	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	newRepo := CourierRepo{gorm: tx}
-	err := fn(newRepo)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	if err := tx.Commit().Error; err != nil {
-		return err
-	}
-
-	return nil
 }
 
 type CourierToCreateDTO struct {
@@ -80,138 +54,122 @@ type CourierWorkingHoursIntervalDTO struct {
 	EndTime   time.Time
 }
 
-func (s *CourierRepo) BatchCreate(newCouriers []CourierToCreateDTO) (*[]entity.Courier, error) {
-
-	couriers := []Courier{}
-
-	err := s.Atomic(func(repo CourierRepo) error {
-		for _, c := range newCouriers {
-
-			// BUG: if we assign `working hours` to courier here,
-			// we will deal with duplicate INSERT queries
-
-			couriers = append(couriers, Courier{
-				CourierType: c.CourierType,
-				Regions:     c.Regions,
-			})
-		}
-
-		dbRes := repo.gorm.CreateInBatches(couriers, 20)
-		if dbRes.Error != nil {
-			return dbRes.Error
-		}
-
-		for i, c := range newCouriers {
-			courier := &couriers[i]
-
-			for _, wh := range c.WorkingHours {
-				(*courier).WorkingHours = append(courier.WorkingHours, CourierWorkingHours{
-					Courier:   courier,
-					StartTime: types.NewTime(wh.StartTime.Hour(), wh.StartTime.Minute(), wh.StartTime.Second()),
-					EndTime:   types.NewTime(wh.EndTime.Hour(), wh.EndTime.Minute(), wh.EndTime.Second()),
-				})
-			}
-
-			dbRes = repo.gorm.Save(courier)
-			if dbRes.Error != nil {
-				return dbRes.Error
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	res := []entity.Courier{}
-	for _, c := range couriers {
-
-		wh := []string{}
-		for _, t := range c.WorkingHours {
-			st := time.Time(t.StartTime).Format("15:04")
-			et := time.Time(t.EndTime).Format("15:04")
-
-			wh = append(wh, st+"-"+et)
-		}
-
-		res = append(res, entity.Courier{
-			ID:           c.ID,
-			CourierType:  entity.CourierType(c.CourierType),
-			Regions:      c.Regions,
-			WorkingHours: wh,
-		})
-	}
-
-	return &res, nil
-}
-
-func (s *CourierRepo) FindById(id uint64) (*entity.Courier, error) {
-
-	var courier Courier
-
-	err := s.gorm.Model(&Courier{}).Preload("WorkingHours").Find(&courier, int(id)).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-
-			CourierNotFoundError.Err = err
-			return nil, CourierNotFoundError
-		}
-
-		return nil, err
-	}
+func toCourierEntity(c Courier) entity.Courier {
 
 	wh := []string{}
-	for _, t := range courier.WorkingHours {
+	for _, t := range c.WorkingHours {
 		st := time.Time(t.StartTime).Format("15:04")
 		et := time.Time(t.EndTime).Format("15:04")
 
 		wh = append(wh, st+"-"+et)
 	}
 
-	return &entity.Courier{
-		ID:           courier.ID,
-		CourierType:  entity.CourierType(courier.CourierType),
-		Regions:      courier.Regions,
+	return entity.Courier{
+		ID:           c.ID,
+		CourierType:  entity.CourierType(c.CourierType),
+		Regions:      c.Regions,
 		WorkingHours: wh,
-	}, nil
+	}
 }
 
-func (s *CourierRepo) PaginatedFetchAll(offset, limit int32) (*[]entity.Courier, error) {
+func (s *CourierRepo) BatchCreate(ctx context.Context, newCouriers []CourierToCreateDTO) (*[]entity.Courier, error) {
 
 	couriers := []Courier{}
 
-	err := s.gorm.Model(&Courier{}).Preload("WorkingHours").Limit(int(limit)).Offset(int(offset)).Find(&couriers).Error
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+
+	for _, c := range newCouriers {
+
+		// BUG: if we assign `working hours` to courier here,
+		// we will deal with duplicate INSERT queries
+
+		couriers = append(couriers, Courier{
+			CourierType: c.CourierType,
+			Regions:     c.Regions,
+		})
+	}
+
+	dbRes := db.CreateInBatches(couriers, 20)
+	if dbRes.Error != nil {
+		return nil, dbRes.Error
+	}
+
+	for i, c := range newCouriers {
+		courier := &couriers[i]
+
+		for _, wh := range c.WorkingHours {
+			(*courier).WorkingHours = append(courier.WorkingHours, CourierWorkingHours{
+				Courier:   courier,
+				StartTime: types.NewTime(wh.StartTime.Hour(), wh.StartTime.Minute(), wh.StartTime.Second()),
+				EndTime:   types.NewTime(wh.EndTime.Hour(), wh.EndTime.Minute(), wh.EndTime.Second()),
+			})
+		}
+
+		dbRes = db.Save(courier)
+		if dbRes.Error != nil {
+			return nil, dbRes.Error
+		}
+	}
+
+	res := []entity.Courier{}
+	for _, c := range couriers {
+		res = append(res, toCourierEntity(c))
+	}
+
+	return &res, nil
+}
+
+func (s *CourierRepo) FindById(ctx context.Context, id uint64) (*entity.Courier, error) {
+
+	var courier Courier
+
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Model(&Courier{}).Preload("WorkingHours").Where("id = ?", id).First(&courier).Error
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, &bstask.Error{
+				Op:      "repositories.CourierRepo.FindById",
+				Code:    bstask.ENOTFOUND,
+				Err:     err,
+				Message: "courier not found",
+				Fields: map[string]interface{}{
+					"courier_id": id,
+				},
+			}
+		}
+
+		return nil, err
+	}
+
+	entity := toCourierEntity(courier)
+
+	return &entity, nil
+}
+
+func (s *CourierRepo) PaginatedFetchAll(ctx context.Context, offset, limit int32) (*[]entity.Courier, error) {
+
+	couriers := []Courier{}
+
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Model(&Courier{}).Preload("WorkingHours").Limit(int(limit)).Offset(int(offset)).Find(&couriers).Error
 	if err != nil {
 		return nil, err
 	}
 
 	res := []entity.Courier{}
 	for _, c := range couriers {
-
-		wh := []string{}
-		for _, t := range c.WorkingHours {
-			st := time.Time(t.StartTime).Format("15:04")
-			et := time.Time(t.EndTime).Format("15:04")
-
-			wh = append(wh, st+"-"+et)
-		}
-
-		res = append(res, entity.Courier{
-			ID:           c.ID,
-			CourierType:  entity.CourierType(c.CourierType),
-			Regions:      c.Regions,
-			WorkingHours: wh,
-		})
+		res = append(res, toCourierEntity(c))
 	}
 
 	return &res, nil
 }
 
-func (s *CourierRepo) WorkingIntervalForDelivery(courierID uint64, start, end time.Time) (*CourierWorkingHours, error) {
+func (s *CourierRepo) WorkingIntervalForDelivery(ctx context.Context, courierID uint64, start, end time.Time) (*CourierWorkingHours, error) {
 	var wh *CourierWorkingHours
 
-	err := s.gorm.Where(
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Where(
 		"start_time <= ? AND end_time >= ? AND courier_id = ?",
 		start.Format("15:04:05"),
 		end.Format("15:04:05"),
@@ -234,7 +192,7 @@ type AllWorkingHoursRes struct {
 	EndTime        time.Time
 }
 
-func (s *CourierRepo) AllWorkingHoursByCourierType(courierType entity.CourierType) (*[]AllWorkingHoursRes, error) {
+func (s *CourierRepo) AllWorkingHoursByCourierType(ctx context.Context, courierType entity.CourierType) (*[]AllWorkingHoursRes, error) {
 
 	tmp := []struct {
 		CourierID      uint64        `gorm:"column:courier_id"`
@@ -245,7 +203,8 @@ func (s *CourierRepo) AllWorkingHoursByCourierType(courierType entity.CourierTyp
 		EndTime        types.Time    `gorm:"column:end_time"`
 	}{}
 
-	err := s.gorm.Raw(`
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Raw(`
 		SELECT 
 			"c"."id" as "courier_id",
 			"c"."courier_type" as "courier_type",

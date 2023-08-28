@@ -23,6 +23,8 @@ services:
       - POSTGRES_PASSWORD=password
     networks:
       - enrollment
+    ports:
+      - 5432:5432
 
 networks:
   enrollment:

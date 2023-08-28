@@ -1,6 +1,8 @@
 package main
 
 import (
+	trmgorm "github.com/avito-tech/go-transaction-manager/gorm"
+	"github.com/avito-tech/go-transaction-manager/trm/manager"
 	"yandex-team.ru/bstask/config"
 	"yandex-team.ru/bstask/internal/http"
 	"yandex-team.ru/bstask/internal/http/controller"
@@ -12,7 +14,6 @@ import (
 
 // TODO поработать с созданием и проверкой delivery_groups
 // TODO проверить, что количество регионов соответствую типу курьера
-
 func main() {
 
 	dbConf := config.DatabaseConf()
@@ -24,20 +25,27 @@ func main() {
 		dbConf.Pgsql.Port,
 	)
 
-	db.AutoMigrate(
-		&repositories.Courier{},
-		&repositories.CourierWorkingHours{},
-		&repositories.Order{},
-		&repositories.OrderDeliveryHours{},
-		&repositories.DeliveryGroup{},
-	)
+	appConf := config.NewAppConfig()
 
-	courierRepo := repositories.NewCourierRepo(db)
-	orderRepo := repositories.NewOrderRepo(db)
-	deliveryGroupRepo := repositories.NewOrderGroupRepo(db)
+	// db.AutoMigrate(
+	// 	&repositories.Courier{},
+	// 	&repositories.CourierWorkingHours{},
+	// 	&repositories.Order{},
+	// 	&repositories.OrderDeliveryHours{},
+	// 	&repositories.DeliveryGroup{},
+	// )
 
-	courierUseCase := courier.New(courierRepo, orderRepo, deliveryGroupRepo)
-	orderUseCase := order.New(orderRepo, courierRepo, deliveryGroupRepo)
+	courierRepo := repositories.NewCourierRepo(db, trmgorm.DefaultCtxGetter)
+	orderRepo := repositories.NewOrderRepo(db, trmgorm.DefaultCtxGetter)
+	deliveryGroupRepo := repositories.NewOrderGroupRepo(db, trmgorm.DefaultCtxGetter)
+
+	m, err := manager.New(trmgorm.NewDefaultFactory(db))
+	if err != nil {
+		panic(err)
+	}
+
+	courierUseCase := courier.New(m, courierRepo, orderRepo, deliveryGroupRepo)
+	orderUseCase := order.New(m, orderRepo, courierRepo, deliveryGroupRepo)
 
 	cs := http.Controllers{
 		CourierController: controller.NewCourierController(courierUseCase),
@@ -45,7 +53,7 @@ func main() {
 	}
 	r := http.NewRouter(cs)
 
-	e := http.NewHttpServer()
+	e := http.NewHttpServer(appConf)
 	r.SetupRoutes(e)
 
 	e.Logger.Fatal(e.Start(":8080"))

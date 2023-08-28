@@ -6,10 +6,20 @@ services:
     volumes:
       - ./tests:/code
     working_dir: /code
+    depends_on:
+      - app
     environment:
       host: "http://app:8080"
+      POSTRGES_HOST: "db"
+      POSTRGES_PORT: 5432
+      POSTRGES_USER: postgres
+      POSTGRES_PASSWORD: password
     links:
       - app
     networks:
       - enrollment
-    command: /bin/sh -c "go mod tidy && go test -v"
+    command: /bin/sh -c "go mod tidy && go test -v ./tests/..."
+
+networks:
+  enrollment:
+    driver: bridge

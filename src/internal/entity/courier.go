@@ -3,7 +3,7 @@ package entity
 import (
 	"time"
 
-	appErrors "yandex-team.ru/bstask/internal/errors"
+	"yandex-team.ru/bstask"
 )
 
 type Courier struct {
@@ -46,6 +46,8 @@ func IsValidCourierType(t string) bool {
 }
 
 func (c *Courier) SalaryRatio() (uint, error) {
+	const op = "entity.SalaryRatio"
+
 	switch c.CourierType {
 	case FOOT:
 		return 2, nil
@@ -54,11 +56,13 @@ func (c *Courier) SalaryRatio() (uint, error) {
 	case AUTO:
 		return 4, nil
 	default:
-		return 0, appErrors.NewInternalError(nil, "invalid courier type", true)
+		return 0, &bstask.Error{Op: op, Code: bstask.EINVALID, Message: "invalid courier type"}
 	}
 }
 
 func (c *Courier) RatingRatio() (uint, error) {
+	const op = "entity.RatingRatio"
+
 	switch c.CourierType {
 	case FOOT:
 		return 3, nil
@@ -67,11 +71,13 @@ func (c *Courier) RatingRatio() (uint, error) {
 	case AUTO:
 		return 1, nil
 	default:
-		return 0, appErrors.NewInternalError(nil, "invalid courier type", true)
+		return 0, &bstask.Error{Op: op, Code: bstask.EINVALID, Message: "invalid courier type"}
 	}
 }
 
 func DeliveryPotentialForType(t CourierType) (DeliveryPotential, error) {
+	const op = "entity.DeliveryPotentialForType"
+
 	switch t {
 	case FOOT:
 		return DeliveryPotential{
@@ -92,7 +98,7 @@ func DeliveryPotentialForType(t CourierType) (DeliveryPotential, error) {
 			MaxRegions: 3,
 		}, nil
 	default:
-		return DeliveryPotential{}, appErrors.NewInternalError(nil, "invalid courier type", true)
+		return DeliveryPotential{}, &bstask.Error{Op: op, Code: bstask.EINVALID, Message: "invalid courier type"}
 	}
 }
 
@@ -105,6 +111,8 @@ func DeliveryInBatchCostDiscountPercents(ordersCountInBatch uint) uint32 {
 }
 
 func NextDeliveryTimeInRegion(t CourierType, ordersCountInBatch uint) (time.Duration, error) {
+	const op = "entity.NextDeliveryTimeInRegion"
+
 	switch t {
 	case FOOT:
 		if ordersCountInBatch > 0 {
@@ -125,6 +133,6 @@ func NextDeliveryTimeInRegion(t CourierType, ordersCountInBatch uint) (time.Dura
 			return time.ParseDuration("8m")
 		}
 	default:
-		return 0, appErrors.NewInternalError(nil, "invalid courier type", true)
+		return 0, &bstask.Error{Op: op, Code: bstask.EINVALID, Message: "invalid courier type"}
 	}
 }

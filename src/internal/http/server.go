@@ -5,15 +5,22 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"gopkg.in/go-playground/validator.v9"
-	appErrors "yandex-team.ru/bstask/internal/errors"
+	"yandex-team.ru/bstask"
+	"yandex-team.ru/bstask/config"
 )
 
-func NewHttpServer() *echo.Echo {
+func NewHttpServer(conf config.AppConfig) *echo.Echo {
 	e := echo.New()
 
 	e.Validator = &CustomValidator{Validator: validator.New()}
 	e.HTTPErrorHandler = HttpErrorHandler
+
+	// setup middlewares
+	if conf.Env != "test" {
+		e.Use(middleware.RateLimiterWithConfig(RatelimiterConfig()))
+	}
 
 	return e
 }
@@ -24,21 +31,29 @@ func HttpErrorHandler(err error, c echo.Context) {
 		return
 	}
 
-	var appErr *appErrors.InternalError
+	c.Logger().Error(err)
 
+	var appErr *bstask.Error
 	if errors.As(err, &appErr) {
+		httpCode := bstask.ErrCodeToHTTPStatus(appErr)
+		message := bstask.DefaultErrorMessage
 
-		appErr = err.(*appErrors.InternalError)
-		c.Logger().Error(appErr)
-
-		if appErr.IsPublic {
-			c.JSON(http.StatusBadRequest, appErr)
-			return
+		if httpCode < 500 {
+			message = bstask.ErrorMessage(appErr)
 		}
+
+		c.JSON(httpCode, message)
+		return
+	}
+
+	var echoError *echo.HTTPError
+	if errors.As(err, &echoError) {
+		c.JSON(echoError.Code, echoError.Message)
+		return
 	}
 
 	c.JSON(
-		http.StatusBadRequest,
+		http.StatusInternalServerError,
 		http.StatusText(http.StatusInternalServerError),
 	)
 }

@@ -1,20 +1,17 @@
 package repositories
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	trmgorm "github.com/avito-tech/go-transaction-manager/gorm"
 	"github.com/lib/pq"
 	"gorm.io/gorm"
+	"yandex-team.ru/bstask"
 	"yandex-team.ru/bstask/internal/entity"
-	appErrors "yandex-team.ru/bstask/internal/errors"
 	"yandex-team.ru/bstask/pkg/gorm/types"
-)
-
-var (
-	OrderNotFoundError     = appErrors.NewInternalError(nil, "Order not found", true)
-	CourierAlreadyAssigned = appErrors.NewInternalError(nil, "Courier already assigned to order", true)
 )
 
 // @migration
@@ -39,39 +36,37 @@ type OrderDeliveryHours struct {
 }
 
 type OrderRepo struct {
-	gorm *gorm.DB
+	gorm      *gorm.DB
+	ctxGetter *trmgorm.CtxGetter
 }
 
-func NewOrderRepo(grm *gorm.DB) *OrderRepo {
+func NewOrderRepo(grm *gorm.DB, c *trmgorm.CtxGetter) *OrderRepo {
 	return &OrderRepo{
-		gorm: grm,
+		gorm:      grm,
+		ctxGetter: c,
 	}
 }
 
-func (s *OrderRepo) Atomic(fn func(repo OrderRepo) error) error {
-	tx := s.gorm.Begin()
-	if err := tx.Error; err != nil {
-		return err
+func toOrderEntity(o Order) entity.Order {
+
+	dh := []entity.OrderDeliveryHours{}
+	for _, t := range o.DeliveryHours {
+		dh = append(dh, entity.OrderDeliveryHours{
+			ID:        t.ID,
+			StartTime: time.Time(t.StartTime),
+			EndTime:   time.Time(t.EndTime),
+		})
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	newRepo := OrderRepo{gorm: tx}
-	err := fn(newRepo)
-	if err != nil {
-		tx.Rollback()
-		return err
+	return entity.Order{
+		ID:              o.ID,
+		Weight:          o.Weight,
+		Regions:         o.Regions,
+		DeliveryHours:   dh,
+		Cost:            o.Cost,
+		CompletedTime:   o.CompletedTime,
+		DeliveryGroupID: o.DeliveryGroupID,
 	}
-
-	if err := tx.Commit().Error; err != nil {
-		return err
-	}
-
-	return nil
 }
 
 type OrderToCreateDTO struct {
@@ -86,142 +81,91 @@ type OrderDeliveryHoursIntervalDTO struct {
 	EndTime   time.Time
 }
 
-func (s *OrderRepo) BatchCreate(newOrders []OrderToCreateDTO) (*[]entity.Order, error) {
+func (s *OrderRepo) BatchCreate(ctx context.Context, newOrders []OrderToCreateDTO) (*[]entity.Order, error) {
 
 	orders := []Order{}
 
-	err := s.Atomic(func(repo OrderRepo) error {
-		for _, o := range newOrders {
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	for _, o := range newOrders {
 
-			// BUG: if we assign `delivery hours` to courier here,
-			// we will deal with duplicate INSERT queries
+		// BUG: if we assign `delivery hours` to courier here,
+		// we will deal with duplicate INSERT queries
 
-			orders = append(orders, Order{
-				Weight:  o.Weight,
-				Regions: o.Regions,
-				Cost:    o.Cost,
+		orders = append(orders, Order{
+			Weight:  o.Weight,
+			Regions: o.Regions,
+			Cost:    o.Cost,
+		})
+	}
+
+	dbRes := db.CreateInBatches(orders, 20)
+	if dbRes.Error != nil {
+		return nil, dbRes.Error
+	}
+
+	for i, c := range newOrders {
+		order := &orders[i]
+
+		for _, dh := range c.DeliveryHours {
+			(*order).DeliveryHours = append(order.DeliveryHours, OrderDeliveryHours{
+				Order:     order,
+				StartTime: types.NewTime(dh.StartTime.Hour(), dh.StartTime.Minute(), dh.StartTime.Second()),
+				EndTime:   types.NewTime(dh.EndTime.Hour(), dh.EndTime.Minute(), dh.EndTime.Second()),
 			})
 		}
 
-		dbRes := repo.gorm.CreateInBatches(orders, 20)
+		dbRes = db.Save(order)
 		if dbRes.Error != nil {
-			return dbRes.Error
+			return nil, dbRes.Error
 		}
-
-		for i, c := range newOrders {
-			order := &orders[i]
-
-			for _, dh := range c.DeliveryHours {
-				(*order).DeliveryHours = append(order.DeliveryHours, OrderDeliveryHours{
-					Order:     order,
-					StartTime: types.NewTime(dh.StartTime.Hour(), dh.StartTime.Minute(), dh.StartTime.Second()),
-					EndTime:   types.NewTime(dh.EndTime.Hour(), dh.EndTime.Minute(), dh.EndTime.Second()),
-				})
-			}
-
-			dbRes = repo.gorm.Save(order)
-			if dbRes.Error != nil {
-				return dbRes.Error
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	res := []entity.Order{}
 	for _, o := range orders {
-
-		dh := []entity.OrderDeliveryHours{}
-		for _, t := range o.DeliveryHours {
-			dh = append(dh, entity.OrderDeliveryHours{
-				ID:        t.ID,
-				StartTime: time.Time(t.StartTime),
-				EndTime:   time.Time(t.EndTime),
-			})
-		}
-
-		res = append(res, entity.Order{
-			ID:              o.ID,
-			Weight:          o.Weight,
-			Regions:         o.Regions,
-			DeliveryHours:   dh,
-			Cost:            o.Cost,
-			CompletedTime:   o.CompletedTime,
-			DeliveryGroupID: o.DeliveryGroupID,
-		})
+		res = append(res, toOrderEntity(o))
 	}
 
 	return &res, nil
 }
 
-func (s *OrderRepo) FindById(id uint64) (*entity.Order, error) {
+func (s *OrderRepo) FindById(ctx context.Context, id uint64) (*entity.Order, error) {
 
 	var order Order
 
-	err := s.gorm.Model(&Order{}).Preload("DeliveryHours").Find(&order, int(id)).Error
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Model(&Order{}).Preload("DeliveryHours").First(&order, id).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-
-			OrderNotFoundError.Err = err
-			return nil, OrderNotFoundError
+			return nil, &bstask.Error{
+				Op:  "repositories.OrderRepo.FindById",
+				Err: err,
+				Fields: map[string]interface{}{
+					"order_id": id,
+				},
+			}
 		}
 
 		return nil, err
 	}
 
-	dh := []entity.OrderDeliveryHours{}
-	for _, t := range order.DeliveryHours {
-		dh = append(dh, entity.OrderDeliveryHours{
-			ID:        t.ID,
-			StartTime: time.Time(t.StartTime),
-			EndTime:   time.Time(t.EndTime),
-		})
-	}
+	res := toOrderEntity(order)
 
-	return &entity.Order{
-		ID:              order.ID,
-		Weight:          order.Weight,
-		Regions:         order.Regions,
-		DeliveryHours:   dh,
-		Cost:            order.Cost,
-		CompletedTime:   order.CompletedTime,
-		DeliveryGroupID: order.DeliveryGroupID,
-	}, nil
+	return &res, nil
 }
 
-func (s *OrderRepo) PaginatedFetchAll(offset, limit int32) (*[]entity.Order, error) {
+func (s *OrderRepo) PaginatedFetchAll(ctx context.Context, offset, limit int32) (*[]entity.Order, error) {
 
 	orders := []Order{}
 
-	err := s.gorm.Model(&Order{}).Preload("DeliveryHours").Limit(int(limit)).Offset(int(offset)).Find(&orders).Error
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Model(&Order{}).Preload("DeliveryHours").Limit(int(limit)).Offset(int(offset)).Find(&orders).Error
 	if err != nil {
 		return nil, err
 	}
 
 	res := []entity.Order{}
 	for _, o := range orders {
-
-		dh := []entity.OrderDeliveryHours{}
-		for _, t := range o.DeliveryHours {
-			dh = append(dh, entity.OrderDeliveryHours{
-				ID:        t.ID,
-				StartTime: time.Time(t.StartTime),
-				EndTime:   time.Time(t.EndTime),
-			})
-		}
-
-		res = append(res, entity.Order{
-			ID:              o.ID,
-			Weight:          o.Weight,
-			Regions:         o.Regions,
-			DeliveryHours:   dh,
-			Cost:            o.Cost,
-			CompletedTime:   o.CompletedTime,
-			DeliveryGroupID: o.DeliveryGroupID,
-		})
+		res = append(res, toOrderEntity(o))
 	}
 
 	return &res, nil
@@ -234,7 +178,7 @@ type OrderCompleteInfoDTO struct {
 	CompleteTime    time.Time
 }
 
-func (s *OrderRepo) SetCompletedInfo(order *entity.Order, info OrderCompleteInfoDTO) error {
+func (s *OrderRepo) SetCompletedInfo(ctx context.Context, order *entity.Order, info OrderCompleteInfoDTO) error {
 
 	order.Cost = info.Cost
 	order.CompletedTime = &info.CompleteTime
@@ -259,7 +203,8 @@ func (s *OrderRepo) SetCompletedInfo(order *entity.Order, info OrderCompleteInfo
 		DeliveryGroupID: &info.DeliveryGroupID,
 	}
 
-	err := s.gorm.Save(&o).Error
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Save(&o).Error
 	if err != nil {
 		return err
 	}
@@ -268,14 +213,16 @@ func (s *OrderRepo) SetCompletedInfo(order *entity.Order, info OrderCompleteInfo
 }
 
 func (s *OrderRepo) CostInIntervalByCourierId(
+	ctx context.Context,
 	courierID uint64,
 	startDate,
 	endDate time.Time,
-) (*uint64, error) {
+) (uint64, error) {
 
 	var cost *uint64 = nil
 
-	err := s.gorm.Raw(`
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Raw(`
 		SELECT SUM(o."cost") as "cost" FROM "orders" as o
 		LEFT JOIN "delivery_groups" as odg ON odg."id" = o."delivery_group_id"
 		WHERE odg."courier_id" = ?
@@ -286,21 +233,23 @@ func (s *OrderRepo) CostInIntervalByCourierId(
 	).Scan(&cost).Error
 
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return cost, nil
+	return *cost, nil
 }
 
 func (s *OrderRepo) CountInIntervalByCourierId(
+	ctx context.Context,
 	courierID uint64,
 	startDate,
 	endDate time.Time,
-) (*uint64, error) {
+) (uint64, error) {
 
 	var count *uint64 = nil
 
-	err := s.gorm.Raw(`
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Raw(`
 		SELECT COUNT(o.*) as "count" FROM "orders" as o
 		LEFT JOIN "delivery_groups" as odg ON odg."id" = o."delivery_group_id"
 		WHERE odg."courier_id" = ?
@@ -311,10 +260,10 @@ func (s *OrderRepo) CountInIntervalByCourierId(
 	).Row().Scan(&count)
 
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return count, nil
+	return *count, nil
 }
 
 type FindInRegionsForCourierDTO struct {
@@ -322,146 +271,70 @@ type FindInRegionsForCourierDTO struct {
 	Regions            []int32
 	DeliveryHoursStart time.Time
 	DeliveryHoursEnd   time.Time
+	OrderByWeightASC   bool
+	WithGap            bool
 }
 
-func (s *OrderRepo) FindInRegionForCourier(
-	params FindInRegionsForCourierDTO,
-	orderByWeightASC bool,
-) (*entity.Order, error) {
-
-	var order *Order = nil
+func (s *OrderRepo) FindInRegionForCourier(ctx context.Context, params FindInRegionsForCourierDTO) (*entity.Order, error) {
 
 	regionsArr, err := pq.Int32Array(params.Regions).Value()
 	if err != nil {
 		return nil, err
 	}
 
-	var orderingType string
-	if orderByWeightASC {
-		orderingType = "ASC"
-	} else {
-		orderingType = "DESC"
-	}
+	var order *Order = nil
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
 
-	query := fmt.Sprintf(`
+	query := `
 		SELECT "o".* FROM "orders" as "o"
 		LEFT JOIN "order_delivery_hours" "odh"
 			ON "odh"."order_id" = "o"."id"
 		WHERE "o"."delivery_group_id" IS NULL
 			AND "o"."weight" <= ?
 			AND "o"."regions" = ANY(?)
-			AND "odh"."start_time" <= ?
+			AND "odh"."start_time" %s ?
 			AND "odh"."end_time" >= ?
 		ORDER BY "o"."weight" %s
 		LIMIT 1
-		FOR UPDATE SKIP LOCKED`, orderingType)
+		FOR UPDATE SKIP LOCKED`
 
-	err = s.gorm.Raw(
+	orderingType := "DESC"
+	if params.OrderByWeightASC {
+		orderingType = "ASC"
+	}
+
+	startTimeOperator := "<="
+	if params.WithGap {
+		startTimeOperator = ">="
+	}
+
+	query = fmt.Sprintf(query, startTimeOperator, orderingType)
+
+	err = db.Raw(
 		query,
 		params.MaxWeight,
 		regionsArr,
 		params.DeliveryHoursStart.Format("15:04:05"),
 		params.DeliveryHoursEnd.Format("15:04:05"),
 	).Scan(&order).Error
-
 	if err != nil {
 		return nil, err
 	}
 
-	if order != nil {
-
-		var deliveryHours []OrderDeliveryHours
-		err := s.gorm.Where("order_id = ?", order.ID).Find(&deliveryHours).Error
-		if err != nil {
-			return nil, err
-		}
-		order.DeliveryHours = deliveryHours
-
-		dh := []entity.OrderDeliveryHours{}
-		for _, t := range order.DeliveryHours {
-			dh = append(dh, entity.OrderDeliveryHours{
-				ID:        t.ID,
-				StartTime: time.Time(t.StartTime),
-				EndTime:   time.Time(t.EndTime),
-			})
-		}
-
-		res := entity.Order{
-			ID:            order.ID,
-			Weight:        order.Weight,
-			Regions:       order.Regions,
-			DeliveryHours: dh,
-			Cost:          order.Cost,
-			CompletedTime: order.CompletedTime,
-		}
-
-		return &res, nil
+	if order == nil {
+		return nil, nil
 	}
 
-	return nil, nil
-}
-
-func (s *OrderRepo) FindInRegionWithGapForCourier(params FindInRegionsForCourierDTO) (*entity.Order, error) {
-
-	var order *Order = nil
-
-	regionsArr, err := pq.Int32Array(params.Regions).Value()
+	var deliveryHours []OrderDeliveryHours
+	err = db.Where("order_id = ?", order.ID).Find(&deliveryHours).Error
 	if err != nil {
 		return nil, err
 	}
+	order.DeliveryHours = deliveryHours
 
-	err = s.gorm.Raw(`SELECT "o".* FROM "orders" as "o"
-		LEFT JOIN "order_delivery_hours" "odh"
-			ON "odh"."order_id" = "o"."id"
-		WHERE "o"."delivery_group_id" IS NULL
-			AND "o"."weight" <= ?
-			AND "o"."regions" = ANY(?)
-			AND "odh"."start_time" >= ?
-			AND "odh"."end_time" >= ?
-		ORDER BY "o"."weight" ASC
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED`,
-		params.MaxWeight,
-		regionsArr,
-		params.DeliveryHoursStart.Format("15:04:05"),
-		params.DeliveryHoursEnd.Format("15:04:05"),
-	).Scan(&order).Error
+	res := toOrderEntity(*order)
 
-	if err != nil {
-		return nil, err
-	}
-
-	if order != nil {
-
-		var deliveryHours []OrderDeliveryHours
-		err := s.gorm.Where("order_id = ?", order.ID).Find(&deliveryHours).Error
-		if err != nil {
-			return nil, err
-		}
-		order.DeliveryHours = deliveryHours
-
-		dh := []entity.OrderDeliveryHours{}
-		for _, t := range order.DeliveryHours {
-			dh = append(dh, entity.OrderDeliveryHours{
-				ID:        t.ID,
-				StartTime: time.Time(t.StartTime),
-				EndTime:   time.Time(t.EndTime),
-			})
-		}
-
-		res := entity.Order{
-			ID:            order.ID,
-			Weight:        order.Weight,
-			Regions:       order.Regions,
-			DeliveryHours: dh,
-			Cost:          order.Cost,
-			CompletedTime: order.CompletedTime,
-		}
-
-		return &res, nil
-	}
-
-	return nil, nil
+	return &res, nil
 }
 
 func (s *OrderRepo) OrdersInGroup(groupID uint64) (*[]entity.Order, error) {
@@ -474,25 +347,7 @@ func (s *OrderRepo) OrdersInGroup(groupID uint64) (*[]entity.Order, error) {
 
 	res := []entity.Order{}
 	for _, o := range orders {
-
-		dh := []entity.OrderDeliveryHours{}
-		for _, t := range o.DeliveryHours {
-			dh = append(dh, entity.OrderDeliveryHours{
-				ID:        t.ID,
-				StartTime: time.Time(t.StartTime),
-				EndTime:   time.Time(t.EndTime),
-			})
-		}
-
-		res = append(res, entity.Order{
-			ID:              o.ID,
-			Weight:          o.Weight,
-			Regions:         o.Regions,
-			DeliveryHours:   dh,
-			Cost:            o.Cost,
-			CompletedTime:   o.CompletedTime,
-			DeliveryGroupID: o.DeliveryGroupID,
-		})
+		res = append(res, toOrderEntity(o))
 	}
 
 	return &res, nil

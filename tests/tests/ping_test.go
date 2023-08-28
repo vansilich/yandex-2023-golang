@@ -2,11 +2,12 @@ package tests
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"os"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRespondsWithLove(t *testing.T) {

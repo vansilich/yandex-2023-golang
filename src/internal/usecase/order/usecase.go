@@ -1,18 +1,21 @@
 package order
 
 import (
+	"context"
 	"strings"
 	"time"
 
+	"github.com/avito-tech/go-transaction-manager/trm/manager"
 	"gopkg.in/go-playground/validator.v9"
+	"yandex-team.ru/bstask"
 	"yandex-team.ru/bstask/internal/entity"
-	appErrors "yandex-team.ru/bstask/internal/errors"
 	"yandex-team.ru/bstask/internal/repository/repositories"
 	"yandex-team.ru/bstask/internal/usecase/order/action/assign/bydate"
 	validatations "yandex-team.ru/bstask/pkg/validations"
 )
 
 type OrderUseCase struct {
+	trm               *manager.Manager
 	validator         *validator.Validate
 	OrderRepo         *repositories.OrderRepo
 	CourierRepo       *repositories.CourierRepo
@@ -20,6 +23,7 @@ type OrderUseCase struct {
 }
 
 func New(
+	trm *manager.Manager,
 	ordrepo *repositories.OrderRepo,
 	courrepo *repositories.CourierRepo,
 	ogrepo *repositories.DeliveryGroupRepo,
@@ -29,6 +33,7 @@ func New(
 	v.RegisterValidation("each_HH_MM_HH_MM_time_interval", validatations.Each_HH_MM_HH_MM_time_interval)
 
 	return &OrderUseCase{
+		trm:               trm,
 		OrderRepo:         ordrepo,
 		CourierRepo:       courrepo,
 		DeliveryGroupRepo: ogrepo,
@@ -36,12 +41,13 @@ func New(
 	}
 }
 
-func (uc *OrderUseCase) CreateOrders(orders []OrderToCreateDTO) (*[]entity.Order, error) {
+func (uc *OrderUseCase) CreateOrders(ctx context.Context, orders []OrderToCreateDTO) (*[]entity.Order, error) {
+	op := "OrderUseCase.CreateOrders"
 
 	toCreate := []repositories.OrderToCreateDTO{}
 	for _, c := range orders {
 		if err := uc.validator.Struct(c); err != nil {
-			return nil, err
+			return nil, bstask.OpError(op, err)
 		}
 
 		intervals := []repositories.OrderDeliveryHoursIntervalDTO{}
@@ -50,12 +56,12 @@ func (uc *OrderUseCase) CreateOrders(orders []OrderToCreateDTO) (*[]entity.Order
 
 			startTime, err := time.Parse("15:04", spl[0])
 			if err != nil {
-				return nil, err
+				return nil, bstask.OpError(op, err)
 			}
 
 			endTime, err := time.Parse("15:04", spl[1])
 			if err != nil {
-				return nil, err
+				return nil, bstask.OpError(op, err)
 			}
 
 			intervals = append(intervals, repositories.OrderDeliveryHoursIntervalDTO{
@@ -72,65 +78,74 @@ func (uc *OrderUseCase) CreateOrders(orders []OrderToCreateDTO) (*[]entity.Order
 		})
 	}
 
-	savedOrders, err := uc.OrderRepo.BatchCreate(toCreate)
+	var savedOrders *[]entity.Order
+	var err error
+	err = uc.trm.Do(ctx, func(ctx context.Context) error {
+		savedOrders, err = uc.OrderRepo.BatchCreate(ctx, toCreate)
+		return err
+	})
 	if err != nil {
-		return nil, err
+		return nil, bstask.OpError(op, err)
 	}
 
 	return savedOrders, nil
 }
 
-func (uc *OrderUseCase) GetById(id uint64) (*entity.Order, error) {
+func (uc *OrderUseCase) GetById(ctx context.Context, id uint64) (*entity.Order, error) {
+	const op = "OrderUseCase.GetById"
 
-	order, err := uc.OrderRepo.FindById(id)
+	order, err := uc.OrderRepo.FindById(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, bstask.OpError(op, err)
 	}
 
 	return order, nil
 }
 
-func (uc *OrderUseCase) PaginatedGetAll(offset, limit int32) (*[]entity.Order, error) {
-	couriers, err := uc.OrderRepo.PaginatedFetchAll(offset, limit)
+func (uc *OrderUseCase) PaginatedGetAll(ctx context.Context, offset, limit int32) (*[]entity.Order, error) {
+	op := "OrderUseCase.PaginatedGetAll"
+
+	couriers, err := uc.OrderRepo.PaginatedFetchAll(ctx, offset, limit)
 	if err != nil {
-		return nil, err
+		return nil, bstask.OpError(op, err)
 	}
 
 	return couriers, nil
 }
 
-func (uc *OrderUseCase) Complete(toComplete []OrderToCompleteDTO) (*[]entity.Order, error) {
+func (uc *OrderUseCase) Complete(ctx context.Context, toComplete []OrderToCompleteDTO) (*[]entity.Order, error) {
+	const op = "OrderUseCase.Complete"
 
 	res := []entity.Order{}
 
-	err := uc.OrderRepo.Atomic(func(repo repositories.OrderRepo) error {
-
+	err := uc.trm.Do(ctx, func(ctx context.Context) error {
 		for _, i := range toComplete {
 			if err := uc.validator.Struct(i); err != nil {
-				return err
+				return &bstask.Error{Op: op, Err: err, Code: bstask.EINVALID}
 			}
 
-			courierEntity, err := uc.CourierRepo.FindById(uint64(i.CourierId))
+			courierEntity, err := uc.CourierRepo.FindById(ctx, uint64(i.CourierId))
 			if err != nil {
-				return err
+				return bstask.OpError(op, err)
 			}
 
-			orderEntity, err := repo.FindById(uint64(i.OrderId))
+			orderEntity, err := uc.OrderRepo.FindById(ctx, uint64(i.OrderId))
 			if err != nil {
-				return err
+				return bstask.OpError(op, err)
 			}
 
-			wh, err := uc.CourierRepo.WorkingIntervalForDelivery(courierEntity.ID, i.CompleteTime, i.CompleteTime)
+			wh, err := uc.CourierRepo.WorkingIntervalForDelivery(ctx, courierEntity.ID, i.CompleteTime, i.CompleteTime)
 			if err != nil {
-				return err
+				return bstask.OpError(op, err)
 			}
 
 			duration, err := entity.NextDeliveryTimeInRegion(courierEntity.CourierType, 0)
 			if err != nil {
-				return err
+				return bstask.OpError(op, err)
 			}
 
-			deliveryGroupEntity, err := uc.DeliveryGroupRepo.GetOrCreateGroup(
+			deliveryGroupEntity, err := uc.DeliveryGroupRepo.CreateGroup(
+				ctx,
 				courierEntity.ID,
 				wh.ID,
 				i.CompleteTime,
@@ -138,14 +153,21 @@ func (uc *OrderUseCase) Complete(toComplete []OrderToCompleteDTO) (*[]entity.Ord
 				i.CompleteTime,
 			)
 			if err != nil {
-				return err
+				return bstask.OpError(op, err)
 			}
 
 			if orderEntity.DeliveryGroupID != nil && *orderEntity.DeliveryGroupID != uint64(deliveryGroupEntity.ID) {
-				return appErrors.NewInternalError(nil, "Courier already assigned to order", true)
+				return &bstask.Error{
+					Op:      op,
+					Message: "courier already assigned to order",
+					Fields: map[string]interface{}{
+						"courier_id": courierEntity.ID,
+						"order_id":   orderEntity.ID,
+					},
+				}
 			}
 
-			err = repo.SetCompletedInfo(orderEntity, repositories.OrderCompleteInfoDTO{
+			err = uc.OrderRepo.SetCompletedInfo(ctx, orderEntity, repositories.OrderCompleteInfoDTO{
 				CourierID:       courierEntity.ID,
 				DeliveryGroupID: deliveryGroupEntity.ID,
 				Cost:            orderEntity.Cost,
@@ -153,7 +175,7 @@ func (uc *OrderUseCase) Complete(toComplete []OrderToCompleteDTO) (*[]entity.Ord
 			})
 
 			if err != nil {
-				return err
+				return bstask.OpError(op, err)
 			}
 
 			res = append(res, *orderEntity)
@@ -169,8 +191,15 @@ func (uc *OrderUseCase) Complete(toComplete []OrderToCompleteDTO) (*[]entity.Ord
 	return &res, nil
 }
 
-func (uc *OrderUseCase) AssignByDate(assignDate time.Time) (bydate.AssignResponseGroup, error) {
+func (uc *OrderUseCase) AssignByDate(ctx context.Context, assignDate time.Time) (bydate.AssignResponseGroup, error) {
 	action := bydate.New(uc.CourierRepo, uc.OrderRepo, uc.DeliveryGroupRepo)
 
-	return action.Assign(assignDate)
+	var res bydate.AssignResponseGroup
+	var err error
+	err = uc.trm.Do(ctx, func(ctx context.Context) error {
+		res, err = action.Assign(ctx, assignDate)
+		return err
+	})
+
+	return res, err
 }

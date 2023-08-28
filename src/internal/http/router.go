@@ -2,10 +2,8 @@ package http
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 	"yandex-team.ru/bstask/internal/http/controller"
 )
 
@@ -31,35 +29,16 @@ func (r Router) SetupRoutes(e *echo.Echo) {
 	})
 
 	// courier methods
-	e.GET("/couriers/assignments", r.Controllers.CourierController.Assignments, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-	e.GET("/couriers", r.Controllers.CourierController.GetAll, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-	e.POST("/couriers", r.Controllers.CourierController.Create, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-	e.GET("/couriers/:courier_id", r.Controllers.CourierController.GetById, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-	e.GET("/couriers/meta-info/:courier_id", r.Controllers.CourierController.MetaByCourierId, middleware.RateLimiterWithConfig(RatelimiterConfig()))
+	e.GET("/couriers/assignments", r.Controllers.CourierController.Assignments)
+	e.GET("/couriers", r.Controllers.CourierController.GetAll)
+	e.POST("/couriers", r.Controllers.CourierController.Create)
+	e.GET("/couriers/:courier_id", r.Controllers.CourierController.GetById)
+	e.GET("/couriers/meta-info/:courier_id", r.Controllers.CourierController.MetaByCourierId)
 
 	// order methods
-	e.GET("/orders", r.Controllers.OrderController.GetAll, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-	e.POST("/orders", r.Controllers.OrderController.Create, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-	e.POST("/orders/complete", r.Controllers.OrderController.Complete, middleware.RateLimiterWithConfig(RatelimiterConfig()))
+	e.GET("/orders", r.Controllers.OrderController.GetAll)
+	e.POST("/orders", r.Controllers.OrderController.Create)
+	e.POST("/orders/complete", r.Controllers.OrderController.Complete)
 	e.POST("/orders/assign", r.Controllers.OrderController.Assign)
-	e.GET("/orders/:order_id", r.Controllers.OrderController.GetById, middleware.RateLimiterWithConfig(RatelimiterConfig()))
-}
-
-func RatelimiterConfig() middleware.RateLimiterConfig {
-	return middleware.RateLimiterConfig{
-		Skipper: middleware.DefaultSkipper,
-		Store: middleware.NewRateLimiterMemoryStoreWithConfig(
-			middleware.RateLimiterMemoryStoreConfig{Rate: 10, Burst: 0, ExpiresIn: time.Second},
-		),
-		IdentifierExtractor: func(ctx echo.Context) (string, error) {
-			id := ctx.RealIP()
-			return id, nil
-		},
-		ErrorHandler: func(context echo.Context, err error) error {
-			return context.JSON(http.StatusForbidden, nil)
-		},
-		DenyHandler: func(context echo.Context, identifier string, err error) error {
-			return context.JSON(http.StatusTooManyRequests, nil)
-		},
-	}
+	e.GET("/orders/:order_id", r.Controllers.OrderController.GetById)
 }

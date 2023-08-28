@@ -9,6 +9,8 @@ WORKDIR /usr/src/app
 COPY src .
 RUN mkdir -p /usr/local/bin/
 RUN go mod tidy
-RUN go build -v -o /usr/local/bin/app
+
+RUN CGO_ENABLED=0 GOOS=linux go build -v -o /usr/local/bin/app ./cmd/server
+RUN chmod +x /usr/local/bin/app
 
 CMD ["app"]

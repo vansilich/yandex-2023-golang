@@ -1,8 +1,10 @@
 package repositories
 
 import (
+	"context"
 	"time"
 
+	trmgorm "github.com/avito-tech/go-transaction-manager/gorm"
 	"gorm.io/gorm"
 	"yandex-team.ru/bstask/internal/entity"
 	"yandex-team.ru/bstask/pkg/gorm/types"
@@ -21,16 +23,19 @@ type DeliveryGroup struct {
 }
 
 type DeliveryGroupRepo struct {
-	gorm *gorm.DB
+	gorm      *gorm.DB
+	ctxGetter *trmgorm.CtxGetter
 }
 
-func NewOrderGroupRepo(grm *gorm.DB) *DeliveryGroupRepo {
+func NewOrderGroupRepo(grm *gorm.DB, c *trmgorm.CtxGetter) *DeliveryGroupRepo {
 	return &DeliveryGroupRepo{
-		gorm: grm,
+		gorm:      grm,
+		ctxGetter: c,
 	}
 }
 
-func (s *DeliveryGroupRepo) GetOrCreateGroup(
+func (s *DeliveryGroupRepo) CreateGroup(
+	ctx context.Context,
 	courierID uint64,
 	workingHoursID uint64,
 	Date time.Time,
@@ -40,16 +45,14 @@ func (s *DeliveryGroupRepo) GetOrCreateGroup(
 
 	var res DeliveryGroup
 
-	err := s.gorm.
-		Where(DeliveryGroup{
-			CourierID:             courierID,
-			CourierWorkingHoursID: workingHoursID,
-			AssignDate:            types.Date(Date),
-			StartDateTime:         startDateTime,
-			EndDateTime:           endDateTime,
-		}).
-		FirstOrCreate(&res).
-		Error
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Where(DeliveryGroup{
+		CourierID:             courierID,
+		CourierWorkingHoursID: workingHoursID,
+		AssignDate:            types.Date(Date),
+		StartDateTime:         startDateTime,
+		EndDateTime:           endDateTime,
+	}).FirstOrCreate(&res).Error
 
 	if err != nil {
 		return nil, err
@@ -58,9 +61,10 @@ func (s *DeliveryGroupRepo) GetOrCreateGroup(
 	return &res, nil
 }
 
-func (s *DeliveryGroupRepo) Update(group *DeliveryGroup) error {
+func (s *DeliveryGroupRepo) Update(ctx context.Context, group *DeliveryGroup) error {
 
-	err := s.gorm.Save(group).Error
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Save(group).Error
 	if err != nil {
 		return err
 	}
@@ -68,11 +72,12 @@ func (s *DeliveryGroupRepo) Update(group *DeliveryGroup) error {
 	return nil
 }
 
-func (s *DeliveryGroupRepo) AllByDate(date time.Time) (*[]entity.DeliveryGroup, error) {
+func (s *DeliveryGroupRepo) AllByDate(ctx context.Context, date time.Time) (*[]entity.DeliveryGroup, error) {
 
 	groups := []DeliveryGroup{}
 
-	err := s.gorm.Where(
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Where(
 		"assign_date >= ? AND assign_date < ?",
 		date.Format("2006-01-02"),
 		date.AddDate(0, 0, 1).Format("2006-01-02"),
@@ -96,11 +101,12 @@ func (s *DeliveryGroupRepo) AllByDate(date time.Time) (*[]entity.DeliveryGroup, 
 	return &res, nil
 }
 
-func (s *DeliveryGroupRepo) AllByDateAndIds(courierIDs []uint64, date time.Time) (*[]entity.DeliveryGroup, error) {
+func (s *DeliveryGroupRepo) AllByDateAndIds(ctx context.Context, courierIDs []uint64, date time.Time) (*[]entity.DeliveryGroup, error) {
 
 	groups := []DeliveryGroup{}
 
-	err := s.gorm.Where(
+	db := s.ctxGetter.DefaultTrOrDB(ctx, s.gorm).WithContext(ctx)
+	err := db.Where(
 		"assign_date >= ? AND assign_date < ? AND courier_id IN ?",
 		date.Format("2006-01-02"),
 		date.AddDate(0, 0, 1).Format("2006-01-02"),
@@ -123,3 +129,7 @@ func (s *DeliveryGroupRepo) AllByDateAndIds(courierIDs []uint64, date time.Time)
 
 	return &res, nil
 }
+
+// func (s *DeliveryGroupRepo) ByCourierIdInInterval(ctx context.Context courier) (*entity.DeliveryGroup, error) {
+
+// }

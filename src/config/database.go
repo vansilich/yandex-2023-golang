@@ -15,7 +15,7 @@ type DatabaseConfig struct {
 func DatabaseConf() *DatabaseConfig {
 	return &DatabaseConfig{
 		Pgsql: PgsqlConnectionConf{
-			Host:     "db",
+			Host:     "localhost",
 			Port:     5432,
 			Database: "postgres",
 			Username: "postgres",

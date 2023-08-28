@@ -1,6 +1,7 @@
 package bydate
 
 import (
+	"context"
 	"time"
 
 	"yandex-team.ru/bstask/internal/entity"
@@ -57,7 +58,7 @@ func initCourierState(
 	}, nil
 }
 
-func (c *courierBatchState) flush() error {
+func (c *courierBatchState) flush(ctx context.Context) error {
 
 	duration, err := entity.NextDeliveryTimeInRegion(c.courierType, 0)
 	if err != nil {
@@ -72,7 +73,7 @@ func (c *courierBatchState) flush() error {
 
 	if c.deliveryGroup != nil {
 
-		err := c.DeliveryGroupRepo.Update(c.deliveryGroup)
+		err := c.DeliveryGroupRepo.Update(ctx, c.deliveryGroup)
 		if err != nil {
 			return err
 		}
@@ -84,6 +85,7 @@ func (c *courierBatchState) flush() error {
 }
 
 func (c *courierBatchState) addOrder(
+	ctx context.Context,
 	order entity.Order,
 ) (completeDateTime time.Time, discountCost uint32, err error) {
 
@@ -117,7 +119,8 @@ func (c *courierBatchState) addOrder(
 	discountCost = order.Cost / 100 * (100 - discount)
 
 	if c.deliveryGroup == nil {
-		c.deliveryGroup, err = c.DeliveryGroupRepo.GetOrCreateGroup(
+		c.deliveryGroup, err = c.DeliveryGroupRepo.CreateGroup(
+			ctx,
 			c.courierID,
 			c.CourierWorkingHoursID,
 			c.shiftEndDateTime,

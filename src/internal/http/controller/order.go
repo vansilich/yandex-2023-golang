@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"math"
 	"net/http"
 	"strconv"
@@ -54,7 +55,7 @@ func (c *OrderController) GetAll(ctx echo.Context) error {
 		}
 	}
 
-	orders, err := c.uc.PaginatedGetAll(int32(offset), int32(limit))
+	orders, err := c.uc.PaginatedGetAll(context.Background(), int32(offset), int32(limit))
 	if err != nil {
 		return err
 	}
@@ -123,7 +124,7 @@ func (c *OrderController) Create(ctx echo.Context) error {
 		})
 	}
 
-	savedOrders, err := c.uc.CreateOrders(newOrders)
+	savedOrders, err := c.uc.CreateOrders(context.Background(), newOrders)
 	if err != nil {
 		return err
 	}
@@ -165,7 +166,7 @@ func (c *OrderController) GetById(ctx echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, ":order_id must be valid int64")
 	}
 
-	order, err := c.uc.GetById(uint64(orderId))
+	order, err := c.uc.GetById(context.Background(), uint64(orderId))
 	if err != nil {
 		return err
 	}
@@ -221,7 +222,7 @@ func (c *OrderController) Complete(ctx echo.Context) error {
 		})
 	}
 
-	orders, err := c.uc.Complete(toComplete)
+	orders, err := c.uc.Complete(context.Background(), toComplete)
 	if err != nil {
 		return err
 	}
@@ -284,7 +285,7 @@ func (c *OrderController) Assign(ctx echo.Context) error {
 		}
 	}
 
-	assigns, err := c.uc.AssignByDate(assignDate)
+	assigns, err := c.uc.AssignByDate(context.Background(), assignDate)
 	if err != nil {
 		return err
 	}
